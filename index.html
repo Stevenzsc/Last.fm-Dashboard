@@ -1,0 +1,2019 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Last.fm Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="jszip.min.js"></script>
+    <style>
+        * {
+            scrollbar-width: thin;
+            scrollbar-color: rgba(148, 163, 184, 0.18) transparent;
+        }
+
+        *:hover {
+            scrollbar-color: rgba(148, 163, 184, 0.55) transparent;
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(148, 163, 184, 0.14);
+            border: 2px solid transparent;
+            border-radius: 999px;
+            background-clip: padding-box;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(148, 163, 184, 0.58);
+            border: 2px solid transparent;
+            background-clip: padding-box;
+        }
+
+        ::-webkit-scrollbar-corner {
+            background: transparent;
+        }
+
+        .global-progress {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            z-index: 9999;
+            background: rgba(15, 23, 42, 0.72);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 180ms ease;
+        }
+
+        .global-progress.active {
+            opacity: 1;
+        }
+
+        .global-progress-bar {
+            width: 0%;
+            height: 100%;
+            border-radius: 999px;
+            background: linear-gradient(90deg, #2563EB, #14B8A6);
+            box-shadow: 0 0 18px rgba(20, 184, 166, 0.42);
+            transition: width 240ms ease;
+        }
+
+        .cache-progress-track {
+            height: 8px;
+            overflow: hidden;
+            border-radius: 999px;
+            background: rgba(15, 23, 42, 0.8);
+            border: 1px solid rgba(148, 163, 184, 0.18);
+        }
+
+        .cache-progress-bar {
+            width: 0%;
+            height: 100%;
+            border-radius: inherit;
+            background: linear-gradient(90deg, #2563EB, #14B8A6);
+            box-shadow: 0 0 16px rgba(37, 99, 235, 0.32);
+            transition: width 220ms ease;
+        }
+
+        .race-spinner {
+            display: none;
+            align-items: center;
+            gap: 10px;
+            color: #94A3B8;
+            font-size: 12px;
+        }
+
+        .race-spinner.active {
+            display: flex;
+        }
+
+        .race-spinner-ring {
+            width: 18px;
+            height: 18px;
+            border: 2px solid rgba(148, 163, 184, 0.18);
+            border-top-color: #14B8A6;
+            border-radius: 999px;
+            box-shadow: 0 0 16px rgba(20, 184, 166, 0.2);
+            animation: raceSpin 780ms linear infinite;
+        }
+
+        @keyframes raceSpin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white">
+
+<div id="globalProgress" class="global-progress"><div id="globalProgressBar" class="global-progress-bar"></div></div>
+<div id="app"></div>
+
+<script>
+// ============================================
+// 0. Progress UI Helpers
+// ============================================
+class ProgressUI {
+    constructor(containerId, barId, labelId = null) {
+        this.container = document.getElementById(containerId);
+        this.bar = document.getElementById(barId);
+        this.label = labelId ? document.getElementById(labelId) : null;
+        this.value = 0;
+    }
+
+    start(label = 'Working...') {
+        this.value = 0;
+        this.container?.classList.add('active');
+        this.set(4, label);
+    }
+
+    set(percent, label = null) {
+        this.value = Math.max(this.value, Math.min(100, Math.round(percent)));
+        if (this.bar) this.bar.style.width = `${this.value}%`;
+        if (this.label && label) this.label.textContent = `${label} ${this.value}%`;
+    }
+
+    done(label = 'Done') {
+        this.set(100, label);
+        setTimeout(() => this.container?.classList.remove('active'), 450);
+    }
+}
+
+// ============================================
+// 1. API Client Module
+// ============================================
+class APIClient {
+    constructor(apiKey, username) {
+        this.apiKey = apiKey;
+        this.username = username;
+        this.baseUrl = 'https://ws.audioscrobbler.com/2.0/';
+    }
+
+    async fetch(params) {
+        const url = new URL(this.baseUrl);
+        url.searchParams.append('api_key', this.apiKey);
+        url.searchParams.append('format', 'json');
+        
+        Object.entries(params).forEach(([key, value]) => {
+            if (value !== undefined && value !== null) {
+                url.searchParams.append(key, value);
+            }
+        });
+
+        try {
+            const response = await fetch(url);
+            const data = await response.json();
+            
+            if (data.error) {
+                const errorMsg = this.getErrorMessage(data.error);
+                throw new Error(errorMsg);
+            }
+            return data;
+        } catch (err) {
+            throw err;
+        }
+    }
+
+    getErrorMessage(code) {
+        const errors = {
+            2: 'Invalid service',
+            3: 'Invalid method',
+            4: 'Authentication failed - Invalid token',
+            5: 'Invalid format',
+            6: 'Invalid parameters - User not found',
+            7: 'Invalid resource specified',
+            8: 'Operation failed',
+            9: 'Invalid session key',
+            10: 'Invalid API key - Please check your API key',
+            11: 'Service offline',
+            13: 'Invalid method signature',
+            16: 'There was a temporary error processing your request',
+            26: 'Suspended API key',
+            29: 'Rate limit exceeded'
+        };
+        return errors[code] || `API Error: ${code}`;
+    }
+
+    async getUserInfo() {
+        return this.fetch({
+            method: 'user.getInfo',
+            user: this.username
+        });
+    }
+
+    async getRecentTracks(limit = 50, page = 1, from = null, to = null) {
+        return this.fetch({
+            method: 'user.getRecentTracks',
+            user: this.username,
+            limit: limit,
+            page: page,
+            from: from,
+            to: to
+        });
+    }
+
+    async getTopArtists(period = 'overall', limit = 50) {
+        return this.fetch({
+            method: 'user.getTopArtists',
+            user: this.username,
+            period: period,
+            limit: limit
+        });
+    }
+
+    async getTopTracks(period = 'overall', limit = 50) {
+        return this.fetch({
+            method: 'user.getTopTracks',
+            user: this.username,
+            period: period,
+            limit: limit
+        });
+    }
+
+    async getTopAlbums(period = 'overall', limit = 50) {
+        return this.fetch({
+            method: 'user.getTopAlbums',
+            user: this.username,
+            period: period,
+            limit: limit
+        });
+    }
+
+    async getArtistTopAlbums(artistName, limit = 5) {
+        return this.fetch({
+            method: 'artist.getTopAlbums',
+            artist: artistName,
+            limit: limit
+        });
+    }
+
+    async getArtistInfo(artistName) {
+        return this.fetch({
+            method: 'artist.getInfo',
+            artist: artistName
+        });
+    }
+}
+
+// ============================================
+// 2. Auth Manager Module
+// ============================================
+class AuthManager {
+    constructor() {
+        this.storageKey = 'lastfm_auth';
+    }
+
+    save(apiKey, username) {
+        const auth = { apiKey, username };
+        localStorage.setItem(this.storageKey, JSON.stringify(auth));
+    }
+
+    load() {
+        const data = localStorage.getItem(this.storageKey);
+        return data ? JSON.parse(data) : null;
+    }
+
+    clear() {
+        localStorage.removeItem(this.storageKey);
+    }
+
+    isAuthenticated() {
+        return this.load() !== null;
+    }
+}
+
+// ============================================
+// 3. Local IndexedDB Cache
+// ============================================
+class LocalCache {
+    constructor(username) {
+        this.username = username;
+        this.dbName = `lastfm_dashboard_${username}`;
+        this.version = 1;
+        this.db = null;
+    }
+
+    async open() {
+        if (this.db) return this.db;
+
+        this.db = await new Promise((resolve, reject) => {
+            const request = indexedDB.open(this.dbName, this.version);
+
+            request.onupgradeneeded = () => {
+                const db = request.result;
+                if (!db.objectStoreNames.contains('scrobbles')) {
+                    const scrobbles = db.createObjectStore('scrobbles', { keyPath: 'id' });
+                    scrobbles.createIndex('timestamp', 'timestamp', { unique: false });
+                    scrobbles.createIndex('artistName', 'artistName', { unique: false });
+                }
+                if (!db.objectStoreNames.contains('artwork')) {
+                    db.createObjectStore('artwork', { keyPath: 'key' });
+                }
+                if (!db.objectStoreNames.contains('meta')) {
+                    db.createObjectStore('meta', { keyPath: 'key' });
+                }
+            };
+
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+
+        return this.db;
+    }
+
+    async getAll(storeName) {
+        const db = await this.open();
+        return new Promise((resolve, reject) => {
+            const request = db.transaction(storeName, 'readonly').objectStore(storeName).getAll();
+            request.onsuccess = () => resolve(request.result || []);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async putMany(storeName, items) {
+        if (!items || items.length === 0) return;
+
+        const db = await this.open();
+        await new Promise((resolve, reject) => {
+            const transaction = db.transaction(storeName, 'readwrite');
+            const store = transaction.objectStore(storeName);
+            items.forEach(item => store.put(item));
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = () => reject(transaction.error);
+        });
+    }
+
+    async getMeta(key, fallback = null) {
+        const db = await this.open();
+        return new Promise((resolve, reject) => {
+            const request = db.transaction('meta', 'readonly').objectStore('meta').get(key);
+            request.onsuccess = () => resolve(request.result?.value ?? fallback);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async setMeta(key, value) {
+        await this.putMany('meta', [{ key, value }]);
+    }
+
+    async getArtwork(key) {
+        const db = await this.open();
+        return new Promise((resolve, reject) => {
+            const request = db.transaction('artwork', 'readonly').objectStore('artwork').get(key);
+            request.onsuccess = () => resolve(request.result || null);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async saveArtwork(item) {
+        await this.putMany('artwork', [{ ...item, updatedAt: Date.now() }]);
+    }
+
+    async fetchImageBlob(imageUrl, timeoutMs = 3500) {
+        if (!imageUrl) return null;
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+        try {
+            const response = await fetch(imageUrl, { signal: controller.signal });
+            if (!response.ok) return null;
+            return await response.blob();
+        } catch (err) {
+            return null;
+        } finally {
+            clearTimeout(timeoutId);
+        }
+    }
+
+    createArtworkObjectUrl(artwork) {
+        if (artwork?.imageBlob instanceof Blob) {
+            return URL.createObjectURL(artwork.imageBlob);
+        }
+        return artwork?.imageDataUrl || artwork?.imageUrl || '';
+    }
+
+    blobToDataUrl(blob) {
+        return new Promise(resolve => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result || '');
+            reader.onerror = () => resolve('');
+            reader.readAsDataURL(blob);
+        });
+    }
+
+    dataUrlToBlob(dataUrl) {
+        const [header, payload] = String(dataUrl).split(',');
+        const mime = header.match(/data:(.*?);base64/)?.[1] || 'application/octet-stream';
+        const binary = atob(payload || '');
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+        }
+        return new Blob([bytes], { type: mime });
+    }
+
+    normalizeTrack(track) {
+        const timestamp = parseInt(track.date?.uts) || 0;
+        if (!timestamp) return null;
+
+        const artistName = typeof track.artist === 'string'
+            ? track.artist.trim()
+            : String(track.artist?.['#text'] || track.artist?.name || '').trim();
+        if (!artistName) return null;
+
+        const trackName = String(track.name || '').trim();
+        const albumName = String(track.album?.['#text'] || track.album?.name || '').trim();
+        const image = Array.isArray(track.image)
+            ? track.image.map(img => ({ size: img.size || '', '#text': img['#text'] || '' }))
+            : [];
+        const imageUrl = [...image].reverse().find(img => img['#text'])?.['#text'] || '';
+        const id = [
+            timestamp,
+            artistName.toLowerCase(),
+            trackName.toLowerCase(),
+            albumName.toLowerCase()
+        ].join('|');
+
+        return {
+            id,
+            timestamp,
+            artistName,
+            trackName,
+            albumName,
+            image,
+            imageUrl,
+            raw: track
+        };
+    }
+
+    toLastFmTrack(record) {
+        return {
+            name: record.trackName,
+            artist: { '#text': record.artistName, name: record.artistName },
+            album: { '#text': record.albumName },
+            date: { uts: String(record.timestamp) },
+            image: record.image || []
+        };
+    }
+
+    async saveTracks(tracks) {
+        const normalized = tracks.map(track => this.normalizeTrack(track)).filter(Boolean);
+        const artwork = normalized
+            .filter(track => track.imageUrl)
+            .map(track => ({
+                key: `track:${track.artistName}:${track.trackName}`,
+                type: 'track',
+                artistName: track.artistName,
+                trackName: track.trackName,
+                imageUrl: track.imageUrl,
+                updatedAt: Date.now()
+            }));
+
+        await this.putMany('scrobbles', normalized);
+        await this.putMany('artwork', artwork);
+
+        const newestTimestamp = normalized.reduce((max, track) => Math.max(max, track.timestamp), await this.getMeta('lastScrobbleTimestamp', 0));
+        const previousOldestTimestamp = await this.getMeta('oldestScrobbleTimestamp', Number.MAX_SAFE_INTEGER);
+        const oldestTimestamp = normalized.reduce((min, track) => Math.min(min, track.timestamp), previousOldestTimestamp);
+        if (newestTimestamp) {
+            await this.setMeta('lastScrobbleTimestamp', newestTimestamp);
+        }
+        if (oldestTimestamp < Number.MAX_SAFE_INTEGER) {
+            await this.setMeta('oldestScrobbleTimestamp', oldestTimestamp);
+        }
+    }
+
+    async getTracks() {
+        const records = await this.getAll('scrobbles');
+        return records
+            .sort((a, b) => a.timestamp - b.timestamp)
+            .map(record => this.toLastFmTrack(record));
+    }
+
+    async getYears() {
+        const records = await this.getAll('scrobbles');
+        return [...new Set(records.map(record => new Date(record.timestamp * 1000).getFullYear()))]
+            .filter(Boolean)
+            .sort((a, b) => b - a);
+    }
+
+    async exportData() {
+        const [scrobbles, artwork, meta] = await Promise.all([
+            this.getAll('scrobbles'),
+            this.getAll('meta')
+        ]);
+
+        return {
+            app: 'lastfm-dashboard',
+            version: this.version,
+            username: this.username,
+            exportedAt: new Date().toISOString(),
+            stores: { scrobbles, meta }
+        };
+    }
+
+    async exportImageData() {
+        const artwork = await this.getAll('artwork');
+        const serialized = await Promise.all(artwork.map(async item => {
+            const imageData = item.imageBlob instanceof Blob
+                ? await this.blobToDataUrl(item.imageBlob)
+                : (item.imageDataUrl || '');
+            const { imageBlob, ...rest } = item;
+            return {
+                ...rest,
+                imageData,
+                mimeType: item.imageBlob?.type || item.mimeType || ''
+            };
+        }));
+
+        return {
+            app: 'lastfm-dashboard-image-cache',
+            version: this.version,
+            username: this.username,
+            exportedAt: new Date().toISOString(),
+            artwork: serialized
+        };
+    }
+
+    async importData(data) {
+        if (!data?.stores) {
+            throw new Error('Invalid cache backup file');
+        }
+
+        await this.putMany('scrobbles', data.stores.scrobbles || []);
+        await this.putMany('meta', data.stores.meta || []);
+    }
+
+    async importImageData(data) {
+        if (!data?.artwork && !data?.stores?.artwork) {
+            throw new Error('Invalid image cache backup file');
+        }
+
+        const artwork = data.artwork || data.stores.artwork || [];
+        const restored = artwork.map(item => {
+            const imageBlob = item.imageData
+                ? this.dataUrlToBlob(item.imageData)
+                : (item.imageDataUrl ? this.dataUrlToBlob(item.imageDataUrl) : null);
+            const { imageData, imageDataUrl, ...rest } = item;
+            return {
+                ...rest,
+                imageBlob,
+                mimeType: imageBlob?.type || item.mimeType || '',
+                updatedAt: item.updatedAt || Date.now()
+            };
+        }).filter(item => item.imageBlob || item.imageUrl);
+
+        await this.putMany('artwork', restored);
+    }
+}
+
+// ============================================
+// 4. Data Processor for Bar Chart Race
+// ============================================
+class DataProcessor {
+    constructor(apiClient) {
+        this.apiClient = apiClient;
+    }
+
+    async fetchAllRecentTracks(fromDate = null, toDate = null, maxTracks = null, onProgress = null) {
+        const allTracks = [];
+        let page = 1;
+        let hasMore = true;
+        const requestedFromDate = fromDate || null;
+
+        while (hasMore) {
+            try {
+                const data = await this.apiClient.getRecentTracks(200, page, requestedFromDate, toDate);
+                const tracks = data.recenttracks?.track || [];
+                
+                if (!Array.isArray(tracks)) {
+                    if (tracks && tracks.name) allTracks.push(tracks);
+                    break;
+                }
+
+                allTracks.push(...tracks);
+
+                const attr = data.recenttracks?.['@attr'] || {};
+                page = parseInt(attr.page) + 1;
+                const totalPages = parseInt(attr.totalPages) || 1;
+                if (onProgress) {
+                    onProgress({
+                        loaded: allTracks.length,
+                        page: parseInt(attr.page) || page - 1,
+                        totalPages
+                    });
+                }
+
+                hasMore = page <= totalPages && (maxTracks === null || allTracks.length < maxTracks);
+            } catch (err) {
+                console.error('Error fetching tracks:', err);
+                break;
+            }
+        }
+
+        return allTracks;
+    }
+
+    buildTemporalData(tracks, intervalDays = 7) {
+        if (!tracks || tracks.length === 0) {
+            console.log('No tracks provided');
+            return [];
+        }
+
+        const intervals = {};
+        const globalArtistCounts = {};
+        const globalArtistImages = {};
+
+        console.log('Processing', tracks.length, 'tracks');
+
+        // First pass: extract all artist data
+        tracks.forEach((track, idx) => {
+            try {
+                const dateUts = track.date?.uts;
+                const date = parseInt(dateUts) || 0;
+                
+                if (!date) {
+                    return;
+                }
+
+                // Extract artist name - handle Last.fm API format
+                let artistName = '';
+                if (typeof track.artist === 'string') {
+                    artistName = track.artist.trim();
+                } else if (track.artist && track.artist['#text']) {
+                    // Last.fm API returns artist as {#text: 'Artist Name', mbid: '...'}
+                    artistName = String(track.artist['#text']).trim();
+                } else if (track.artist && track.artist.name) {
+                    artistName = String(track.artist.name).trim();
+                }
+
+                if (!artistName || artistName === '[object Object]') {
+                    return;
+                }
+
+                // Extract image
+                let artistImage = '';
+                if (track.image && Array.isArray(track.image) && track.image.length > 0) {
+                    const lastImage = track.image[track.image.length - 1];
+                    artistImage = lastImage?.['#text'] || '';
+                }
+
+                // Group by interval
+                const intervalStart = Math.floor(date / (intervalDays * 86400)) * (intervalDays * 86400);
+                if (!intervals[intervalStart]) {
+                    intervals[intervalStart] = [];
+                }
+                intervals[intervalStart].push({
+                    artistName: artistName,
+                    image: artistImage
+                });
+
+                // Store globally
+                globalArtistCounts[artistName] = (globalArtistCounts[artistName] || 0) + 1;
+                if (!globalArtistImages[artistName] && artistImage) {
+                    globalArtistImages[artistName] = artistImage;
+                }
+            } catch (e) {
+                console.error('Error processing track', idx, e);
+            }
+        });
+
+        console.log('Unique artists found:', Object.keys(globalArtistCounts).length);
+        console.log('Intervals created:', Object.keys(intervals).length);
+        console.log('Sample artists:', Object.keys(globalArtistCounts).slice(0, 5));
+
+        const sortedIntervals = Object.keys(intervals).map(Number).sort((a, b) => a - b);
+        const temporalData = [];
+        const cumulativeArtists = {};
+
+        sortedIntervals.forEach((interval, idx) => {
+            // Add counts from this interval
+            intervals[interval].forEach(item => {
+                if (item.artistName) {
+                    cumulativeArtists[item.artistName] = (cumulativeArtists[item.artistName] || 0) + 1;
+                }
+            });
+
+            // Create snapshot with top 10
+            const snapshot = Object.entries(cumulativeArtists)
+                .map(([name, count]) => ({
+                    artist: name,
+                    playcount: count,
+                    image: globalArtistImages[name] || null
+                }))
+                .sort((a, b) => b.playcount - a.playcount)
+                .slice(0, 10);
+
+            if (snapshot.length > 0) {
+                temporalData.push({
+                    timestamp: interval,
+                    date: new Date(interval * 1000),
+                    artists: snapshot
+                });
+            }
+        });
+
+        console.log('Temporal data frames:', temporalData.length);
+        if (temporalData.length > 0) {
+            console.log('First frame artists:', temporalData[0].artists.length, temporalData[0].artists.map(a => a.artist));
+            console.log('Last frame artists:', temporalData[temporalData.length - 1].artists.length);
+        }
+
+        return temporalData;
+    }
+}
+
+// ============================================
+// 4. Bar Chart Race Animation Engine
+// ============================================
+class BarChartRace {
+    constructor(containerId, data) {
+        this.container = document.getElementById(containerId);
+        this.data = data;
+        this.currentIndex = 0;
+        this.isPlaying = false;
+        this.speed = 1;
+        this.animationId = null;
+        this.frameStartedAt = 0;
+        this.frameDuration = 1800;
+        this.visibleCount = 10;
+        this.rowHeight = 62;
+        this.rowGap = 12;
+        this.colorMap = new Map();
+        this.rowMap = new Map();
+        this.previousLeader = null;
+        this.initializeColors();
+        this.setupUI();
+    }
+
+    initializeColors() {
+        const palette = [
+            '#2563EB', '#059669', '#D97706', '#7C3AED', '#DC2626',
+            '#0891B2', '#BE123C', '#4F46E5', '#65A30D', '#9333EA',
+            '#0F766E', '#B45309', '#1D4ED8', '#9F1239'
+        ];
+
+        this.data.forEach(frame => {
+            frame.artists.forEach(artist => {
+                if (!this.colorMap.has(artist.artist)) {
+                    this.colorMap.set(artist.artist, palette[this.colorMap.size % palette.length]);
+                }
+            });
+        });
+    }
+
+    setupUI() {
+        this.container.innerHTML = `
+            <div class="flex flex-col gap-4">
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                    <div class="flex gap-2">
+                        <button id="playBtn" class="px-4 py-2 bg-green-600 hover:bg-green-700 rounded">Play</button>
+                        <button id="pauseBtn" class="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 rounded">Pause</button>
+                        <button id="resetBtn" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded">Reset</button>
+                    </div>
+                    <div class="flex items-center gap-4">
+                        <label class="flex items-center gap-2">
+                            Speed:
+                            <select id="speedSelect" class="bg-gray-700 px-2 py-1 rounded">
+                                <option value="1">1x</option>
+                                <option value="2">2x</option>
+                                <option value="5">5x</option>
+                            </select>
+                        </label>
+                        <div id="dateDisplay" class="text-lg font-bold min-w-32"></div>
+                    </div>
+                </div>
+                <div id="chartContainer" class="race-stage"></div>
+            </div>
+            <style>
+                .race-stage {
+                    position: relative;
+                    min-height: 760px;
+                    overflow: hidden;
+                    border: 1px solid rgba(148, 163, 184, 0.18);
+                    border-radius: 8px;
+                    background:
+                        linear-gradient(90deg, rgba(148, 163, 184, 0.08) 1px, transparent 1px) 0 0 / 10% 100%,
+                        linear-gradient(180deg, #101827 0%, #111827 100%);
+                    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+                    padding: 26px 28px;
+                }
+                .race-date-watermark {
+                    position: absolute;
+                    right: 32px;
+                    bottom: 24px;
+                    color: rgba(226, 232, 240, 0.13);
+                    font-size: clamp(42px, 8vw, 104px);
+                    font-weight: 800;
+                    line-height: 1;
+                    pointer-events: none;
+                    letter-spacing: 0;
+                }
+                .race-row {
+                    position: absolute;
+                    top: 26px;
+                    left: 28px;
+                    right: 28px;
+                    height: 62px;
+                    will-change: transform, opacity;
+                    transition: transform 900ms cubic-bezier(0.22, 1, 0.36, 1), opacity 500ms ease;
+                    display: grid;
+                    grid-template-columns: 42px 52px minmax(120px, 220px) 1fr 72px;
+                    gap: 14px;
+                    align-items: center;
+                }
+                .race-rank {
+                    color: #CBD5E1;
+                    font-size: 22px;
+                    font-weight: 800;
+                    text-align: right;
+                }
+                .race-name {
+                    color: #F8FAFC;
+                    font-size: 15px;
+                    font-weight: 700;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+                .race-avatar {
+                    width: 48px;
+                    height: 48px;
+                    border-radius: 6px;
+                    overflow: hidden;
+                    background: #334155;
+                    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.24);
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    color: #F8FAFC;
+                    font-size: 16px;
+                    font-weight: 800;
+                }
+                .race-avatar img {
+                    width: 100%;
+                    height: 100%;
+                    object-fit: cover;
+                    display: block;
+                }
+                .race-track {
+                    height: 38px;
+                    position: relative;
+                }
+                .race-bar {
+                    height: 100%;
+                    min-width: 12px;
+                    border-radius: 0 6px 6px 0;
+                    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
+                    transform-origin: left center;
+                    transition: width 900ms cubic-bezier(0.22, 1, 0.36, 1), filter 300ms ease;
+                }
+                .race-value {
+                    color: #E2E8F0;
+                    font-variant-numeric: tabular-nums;
+                    font-size: 15px;
+                    font-weight: 800;
+                    text-align: right;
+                }
+                .race-row.is-leader .race-bar {
+                    filter: saturate(1.18) brightness(1.1);
+                }
+                .race-row.leader-bump {
+                    animation: leaderBump 760ms cubic-bezier(0.22, 1.35, 0.36, 1);
+                    z-index: 3;
+                }
+                @keyframes leaderBump {
+                    0% { scale: 1; }
+                    38% { scale: 1.045; }
+                    100% { scale: 1; }
+                }
+                @media (max-width: 760px) {
+                    .race-stage { min-height: 700px; padding: 20px 14px; }
+                    .race-row {
+                        left: 14px;
+                        right: 14px;
+                        grid-template-columns: 34px 42px minmax(82px, 30%) 1fr 54px;
+                        gap: 8px;
+                    }
+                    .race-avatar { width: 38px; height: 38px; font-size: 13px; }
+                    .race-name, .race-value { font-size: 12px; }
+                    .race-rank { font-size: 16px; }
+                }
+            </style>
+        `;
+
+        document.getElementById('playBtn').addEventListener('click', () => this.play());
+        document.getElementById('pauseBtn').addEventListener('click', () => this.pause());
+        document.getElementById('resetBtn').addEventListener('click', () => this.reset());
+        document.getElementById('speedSelect').addEventListener('change', (e) => {
+            this.speed = parseInt(e.target.value);
+            this.frameStartedAt = performance.now();
+        });
+    }
+
+    render() {
+        if (!this.data || this.data.length === 0) return;
+
+        const frame = this.data[this.currentIndex];
+        const chartDiv = document.getElementById('chartContainer');
+
+        if (!frame || !frame.artists || frame.artists.length === 0) {
+            chartDiv.innerHTML = '<div class="text-center py-8 text-gray-400">No data available</div>';
+            return;
+        }
+
+        const artists = frame.artists.filter(a => a && a.artist).slice(0, this.visibleCount);
+        const maxCount = Math.max(...artists.map(a => a.playcount || 0), 1);
+
+        if (!chartDiv.querySelector('.race-date-watermark')) {
+            chartDiv.innerHTML = '<div class="race-date-watermark"></div>';
+        }
+
+        const activeArtists = new Set();
+        const newLeader = artists[0]?.artist || null;
+
+        artists.forEach((item, idx) => {
+            const artistName = String(item.artist || 'Unknown').trim();
+            const playcount = parseInt(item.playcount) || 0;
+            const image = item.image || '';
+            const percentage = Math.max(2, (playcount / maxCount) * 100);
+            const color = this.colorMap.get(artistName) || this.getColorForArtist(artistName);
+            activeArtists.add(artistName);
+
+            let row = this.rowMap.get(artistName);
+            if (!row) {
+                row = this.createRow(artistName, color);
+                chartDiv.appendChild(row.el);
+                this.rowMap.set(artistName, row);
+            }
+
+            row.rank.textContent = `#${idx + 1}`;
+            row.name.textContent = artistName;
+            row.value.textContent = playcount.toLocaleString();
+            row.avatar.innerHTML = image
+                ? `<img src="${this.escapeHtml(image)}" alt="${this.escapeHtml(artistName)}" onerror="this.parentElement.textContent='${this.escapeHtml(this.getInitials(artistName))}'">`
+                : this.getInitials(artistName);
+            row.avatar.style.background = image ? '#1F2937' : color;
+            row.bar.style.width = `${percentage}%`;
+            row.el.style.opacity = '1';
+            row.el.style.transform = `translate3d(0, ${idx * (this.rowHeight + this.rowGap)}px, 0)`;
+            row.el.classList.toggle('is-leader', idx === 0);
+
+            if (idx === 0 && newLeader && newLeader !== this.previousLeader) {
+                row.el.classList.remove('leader-bump');
+                void row.el.offsetWidth;
+                row.el.classList.add('leader-bump');
+            }
+        });
+
+        this.rowMap.forEach((row, artistName) => {
+            if (!activeArtists.has(artistName)) {
+                row.el.style.opacity = '0';
+                row.el.style.transform = `translate3d(-24px, ${this.visibleCount * (this.rowHeight + this.rowGap)}px, 0)`;
+                row.el.classList.remove('is-leader');
+            }
+        });
+
+        this.previousLeader = newLeader || this.previousLeader;
+
+        const dateDisplay = document.getElementById('dateDisplay');
+        if (dateDisplay) {
+            dateDisplay.textContent = frame.date.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+        }
+
+        const watermark = chartDiv.querySelector('.race-date-watermark');
+        if (watermark) {
+            watermark.textContent = frame.date.toLocaleDateString('en-US', { year: 'numeric', month: 'short' });
+        }
+    }
+
+    createRow(artistName, color) {
+        const row = document.createElement('div');
+        row.className = 'race-row';
+        row.innerHTML = `
+            <div class="race-rank"></div>
+            <div class="race-avatar"></div>
+            <div class="race-name"></div>
+            <div class="race-track"><div class="race-bar"></div></div>
+            <div class="race-value"></div>
+        `;
+        const bar = row.querySelector('.race-bar');
+        bar.style.background = `linear-gradient(90deg, ${color}, ${color}D9)`;
+        return {
+            el: row,
+            rank: row.querySelector('.race-rank'),
+            avatar: row.querySelector('.race-avatar'),
+            name: row.querySelector('.race-name'),
+            bar,
+            value: row.querySelector('.race-value')
+        };
+    }
+
+    getInitials(name) {
+        return name.split(' ').map(word => word[0]).join('').toUpperCase().slice(0, 2) || 'A';
+    }
+
+    escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, char => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        }[char]));
+    }
+
+    getColorForArtist(name) {
+        const colors = ['#2563EB', '#059669', '#D97706', '#7C3AED', '#DC2626', '#0891B2', '#BE123C', '#4F46E5'];
+        let hash = 0;
+        for (let i = 0; i < name.length; i++) {
+            hash = name.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        return colors[Math.abs(hash) % colors.length];
+    }
+
+    animate() {
+        if (!this.isPlaying) return;
+
+        const now = performance.now();
+        const elapsedTime = now - this.frameStartedAt;
+        const intervalMs = this.frameDuration / this.speed;
+
+        if (elapsedTime >= intervalMs) {
+            this.frameStartedAt = now;
+            this.currentIndex++;
+
+            if (this.currentIndex >= this.data.length) {
+                this.currentIndex = this.data.length - 1;
+                this.pause();
+            }
+
+            this.render();
+        }
+
+        this.animationId = requestAnimationFrame(() => this.animate());
+    }
+
+    play() {
+        if (this.isPlaying) return;
+        this.isPlaying = true;
+        this.frameStartedAt = performance.now();
+        this.animate();
+    }
+
+    pause() {
+        this.isPlaying = false;
+        if (this.animationId) {
+            cancelAnimationFrame(this.animationId);
+            this.animationId = null;
+        }
+    }
+
+    reset() {
+        this.currentIndex = 0;
+        this.frameStartedAt = performance.now();
+        this.isPlaying = false;
+        this.previousLeader = null;
+        this.render();
+    }
+}
+// ============================================
+// 5. Dashboard UI Module
+// ============================================
+class Dashboard {
+    constructor(apiClient, authManager) {
+        this.apiClient = apiClient;
+        this.authManager = authManager;
+        this.userInfo = null;
+        this.barChartRace = null;
+        this.artistAlbumImageCache = {};
+        this.objectUrls = new Set();
+        this.cache = new LocalCache(apiClient.username);
+        this.cachedTracks = null;
+        this.cacheStatus = '';
+        this.selectedRaceYear = 'all';
+        this.historicalBackfillPromise = null;
+        this.pageProgress = null;
+    }
+
+    getColorForArtist(name) {
+        const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8', '#F7DC6F', '#BB8FCE', '#85C1E2'];
+        let hash = 0;
+        for (let i = 0; i < name.length; i++) {
+            hash = name.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        return colors[Math.abs(hash) % colors.length];
+    }
+
+    getInitials(name) {
+        return name.split(' ').map(word => word[0]).join('').toUpperCase().slice(0, 2);
+    }
+
+    setPageProgressHandler(handler) {
+        this.pageProgress = handler;
+    }
+
+    startPageProgress(label) {
+        this.pageProgress?.('start', 4, label);
+    }
+
+    updatePageProgress(percent, label) {
+        this.pageProgress?.('set', percent, label);
+    }
+
+    finishPageProgress(label = 'Ready') {
+        this.pageProgress?.('done', 100, label);
+    }
+
+    getArtistName(artist) {
+        if (typeof artist === 'string') return artist;
+        return String(artist?.['#text'] || artist?.name || 'Unknown Artist');
+    }
+
+    async getArtistAlbumImage(artistName) {
+        if (Object.prototype.hasOwnProperty.call(this.artistAlbumImageCache, artistName)) {
+            return this.artistAlbumImageCache[artistName];
+        }
+
+        try {
+            const artworkKey = `artist-album:${artistName}`;
+            const cachedArtwork = await this.cache.getArtwork(artworkKey);
+            if (cachedArtwork) {
+                const cachedImage = this.cache.createArtworkObjectUrl(cachedArtwork);
+                if (cachedImage.startsWith('blob:')) this.objectUrls.add(cachedImage);
+                this.artistAlbumImageCache[artistName] = cachedImage;
+                return cachedImage;
+            }
+
+            const data = await this.apiClient.getArtistTopAlbums(artistName, 5);
+            const albums = data.topalbums?.album || [];
+            const albumList = Array.isArray(albums) ? albums : [albums];
+            const albumWithImage = albumList.find(album => album?.image?.some(img => img?.['#text']));
+            const imageUrl = albumWithImage?.image?.find(img => img.size === 'extralarge')?.['#text'] ||
+                           albumWithImage?.image?.find(img => img.size === 'large')?.['#text'] ||
+                           albumWithImage?.image?.find(img => img.size === 'medium')?.['#text'] ||
+                           albumWithImage?.image?.find(img => img?.['#text'])?.['#text'] ||
+                           null;
+
+            const displayImage = await this.getCachedArtworkUrl(artworkKey, imageUrl, {
+                type: 'artist-album',
+                artistName,
+                albumName: albumWithImage?.name || ''
+            });
+            this.artistAlbumImageCache[artistName] = displayImage;
+            return displayImage;
+        } catch (err) {
+            this.artistAlbumImageCache[artistName] = null;
+            return null;
+        }
+    }
+
+    async loadCachedScrobbles(forceRefresh = false, onProgress = null) {
+        if (this.cachedTracks && !forceRefresh) {
+            return this.cachedTracks;
+        }
+
+        await this.cache.open();
+        const processor = new DataProcessor(this.apiClient);
+        const lastTimestamp = await this.cache.getMeta('lastScrobbleTimestamp', 0);
+        const fromDate = lastTimestamp ? lastTimestamp + 1 : null;
+        let fetchedTracks = await processor.fetchAllRecentTracks(fromDate, null, null, onProgress);
+
+        if (fetchedTracks.length > 0) {
+            await this.cache.saveTracks(fetchedTracks);
+        }
+
+        this.cachedTracks = await this.cache.getTracks();
+        this.cacheStatus = `${this.cachedTracks.length.toLocaleString()} cached scrobbles${fetchedTracks.length ? `, ${fetchedTracks.length.toLocaleString()} newly synced` : ', already up to date'}`;
+        return this.cachedTracks;
+    }
+
+    async shouldRunHistoricalBackfill() {
+        await this.cache.open();
+        const lastTimestamp = await this.cache.getMeta('lastScrobbleTimestamp', 0);
+        const oldestTimestamp = await this.cache.getMeta('oldestScrobbleTimestamp', 0);
+        const historicalBackfillDone = await this.cache.getMeta('historicalBackfillComplete', false);
+        const startOf2025 = Math.floor(new Date('2025-01-01T00:00:00Z').getTime() / 1000);
+        return Boolean(lastTimestamp && !historicalBackfillDone && (!oldestTimestamp || oldestTimestamp >= startOf2025));
+    }
+
+    startHistoricalBackfill() {
+        if (this.historicalBackfillPromise) return this.historicalBackfillPromise;
+
+        this.historicalBackfillPromise = (async () => {
+            try {
+                const shouldBackfill = await this.shouldRunHistoricalBackfill();
+                if (!shouldBackfill) return false;
+
+                const processor = new DataProcessor(this.apiClient);
+                const backfillTracks = await processor.fetchAllRecentTracks(null);
+                if (backfillTracks.length > 0) {
+                    await this.cache.saveTracks(backfillTracks);
+                }
+                await this.cache.setMeta('historicalBackfillComplete', true);
+                this.cachedTracks = await this.cache.getTracks();
+                this.cacheStatus = `${this.cachedTracks.length.toLocaleString()} cached scrobbles, historical backfill complete`;
+                return true;
+            } catch (err) {
+                console.warn('Historical backfill failed:', err);
+                return false;
+            } finally {
+                this.historicalBackfillPromise = null;
+            }
+        })();
+
+        return this.historicalBackfillPromise;
+    }
+
+    filterTracksByYear(tracks, year) {
+        if (year === 'all') return tracks;
+
+        const targetYear = parseInt(year);
+        return tracks.filter(track => {
+            const timestamp = parseInt(track.date?.uts) || 0;
+            return timestamp && new Date(timestamp * 1000).getFullYear() === targetYear;
+        });
+    }
+
+    async getCachedYears() {
+        const years = await this.cache.getYears();
+        return years.length ? years : [new Date().getFullYear()];
+    }
+
+    ensureJSZip() {
+        if (!window.JSZip) {
+            throw new Error('JSZip is not loaded. Make sure jszip.min.js exists next to index.html.');
+        }
+        return window.JSZip;
+    }
+
+    async downloadZip(filename, jsonFilename, data, onProgress = null) {
+        const JSZipLib = this.ensureJSZip();
+        const zip = new JSZipLib();
+        onProgress?.(8, 'Preparing');
+        zip.file(jsonFilename, JSON.stringify(data, null, 2));
+        const blob = await zip.generateAsync({
+            type: 'blob',
+            compression: 'DEFLATE',
+            compressionOptions: { level: 6 }
+        }, metadata => {
+            onProgress?.(8 + (metadata.percent * 0.88), 'Compressing');
+        });
+        onProgress?.(98, 'Downloading');
+        this.downloadBlob(blob, filename);
+    }
+
+    downloadBlob(blob, filename) {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+    }
+
+    async readJsonOrZip(file, preferredJsonFilename, onProgress = null) {
+        onProgress?.(5, 'Reading');
+        if (file.name.toLowerCase().endsWith('.zip')) {
+            const JSZipLib = this.ensureJSZip();
+            onProgress?.(15, 'Opening ZIP');
+            const zip = await JSZipLib.loadAsync(file);
+            const entry = zip.file(preferredJsonFilename) ||
+                zip.file(/\.json$/i).find(item => !item.dir);
+            if (!entry) {
+                throw new Error('No JSON data file found inside the ZIP archive');
+            }
+            const text = await entry.async('string', metadata => {
+                onProgress?.(15 + (metadata.percent * 0.7), 'Extracting');
+            });
+            onProgress?.(90, 'Restoring');
+            return JSON.parse(text);
+        }
+
+        onProgress?.(65, 'Reading JSON');
+        return JSON.parse(await file.text());
+    }
+
+    async exportCache(onProgress = null) {
+        const data = await this.cache.exportData();
+        const safeUser = this.apiClient.username.replace(/[^a-z0-9_-]/gi, '_');
+        await this.downloadZip(
+            `lastfm-cache-${safeUser}-${new Date().toISOString().slice(0, 10)}.zip`,
+            'lastfm-cache.json',
+            data,
+            onProgress
+        );
+    }
+
+    async importCache(file, onProgress = null) {
+        const data = await this.readJsonOrZip(file, 'lastfm-cache.json', onProgress);
+        await this.cache.importData(data);
+        onProgress?.(94, 'Refreshing');
+        this.cachedTracks = null;
+        await this.loadCachedScrobbles(true);
+    }
+
+    async exportImageCache(onProgress = null) {
+        onProgress?.(5, 'Collecting images');
+        const data = await this.cache.exportImageData();
+        const safeUser = this.apiClient.username.replace(/[^a-z0-9_-]/gi, '_');
+        await this.downloadZip(
+            `lastfm-image-cache-${safeUser}-${new Date().toISOString().slice(0, 10)}.zip`,
+            'lastfm-image-cache.json',
+            data,
+            onProgress
+        );
+    }
+
+    async importImageCache(file, onProgress = null) {
+        const data = await this.readJsonOrZip(file, 'lastfm-image-cache.json', onProgress);
+        await this.cache.importImageData(data);
+        onProgress?.(96, 'Refreshing images');
+        this.artistAlbumImageCache = {};
+    }
+
+    revokeArtworkObjectUrls() {
+        this.objectUrls.forEach(url => URL.revokeObjectURL(url));
+        this.objectUrls.clear();
+    }
+
+    async getCachedArtworkUrl(key, imageUrl, metadata = {}) {
+        if (!imageUrl) return '';
+
+        const cachedArtwork = await this.cache.getArtwork(key);
+        if (cachedArtwork) {
+            const cachedImage = this.cache.createArtworkObjectUrl(cachedArtwork);
+            if (cachedImage.startsWith('blob:')) this.objectUrls.add(cachedImage);
+            return cachedImage;
+        }
+
+        const imageBlob = await this.cache.fetchImageBlob(imageUrl);
+        const displayImage = imageBlob ? URL.createObjectURL(imageBlob) : imageUrl;
+        if (displayImage?.startsWith('blob:')) this.objectUrls.add(displayImage);
+
+        await this.cache.saveArtwork({
+            key,
+            ...metadata,
+            imageUrl,
+            imageBlob,
+            mimeType: imageBlob?.type || ''
+        });
+
+        return displayImage;
+    }
+
+    async hydrateRaceArtwork(tracks) {
+        const artistImages = new Map();
+        const artistCounts = new Map();
+
+        tracks.forEach(track => {
+            const artistName = typeof track.artist === 'string'
+                ? track.artist.trim()
+                : String(track.artist?.['#text'] || track.artist?.name || '').trim();
+            const imageUrl = Array.isArray(track.image)
+                ? [...track.image].reverse().find(img => img?.['#text'])?.['#text']
+                : '';
+
+            if (artistName && imageUrl && !artistImages.has(artistName)) {
+                artistImages.set(artistName, imageUrl);
+            }
+            if (artistName) {
+                artistCounts.set(artistName, (artistCounts.get(artistName) || 0) + 1);
+            }
+        });
+
+        const hydratedImages = new Map();
+        const raceArtists = [...artistCounts.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 25)
+            .map(([artistName]) => artistName)
+            .filter(artistName => artistImages.has(artistName));
+
+        const concurrency = 6;
+        for (let i = 0; i < raceArtists.length; i += concurrency) {
+            const batch = raceArtists.slice(i, i + concurrency);
+            const results = await Promise.all(batch.map(async artistName => {
+                const imageUrl = artistImages.get(artistName);
+                const cachedUrl = await this.getCachedArtworkUrl(`race-artist:${artistName}`, imageUrl, {
+                    type: 'race-artist',
+                    artistName
+                });
+                return [artistName, cachedUrl || imageUrl];
+            }));
+            results.forEach(([artistName, imageUrl]) => hydratedImages.set(artistName, imageUrl));
+        }
+
+        return tracks.map(track => {
+            const artistName = typeof track.artist === 'string'
+                ? track.artist.trim()
+                : String(track.artist?.['#text'] || track.artist?.name || '').trim();
+            const cachedUrl = hydratedImages.get(artistName);
+            if (!cachedUrl || !Array.isArray(track.image) || track.image.length === 0) return track;
+
+            const image = track.image.map((img, index) => ({
+                ...img,
+                '#text': index === track.image.length - 1 ? cachedUrl : img['#text']
+            }));
+            return { ...track, image };
+        });
+    }
+
+    async loadUserInfo() {
+        try {
+            const data = await this.apiClient.getUserInfo();
+            this.userInfo = data.user;
+            return this.userInfo;
+        } catch (err) {
+            console.error('Error loading user info:', err);
+            return null;
+        }
+    }
+
+    async renderDashboard(onProgress = null) {
+        onProgress?.(28, 'Loading profile');
+        await this.loadUserInfo();
+        onProgress?.(42, 'Opening local cache');
+        await this.cache.open();
+
+        const app = document.getElementById('app');
+        app.innerHTML = `
+            <div class="h-screen flex flex-col bg-gray-900 text-white">
+                <header class="bg-gray-800 border-b border-gray-700 px-6 py-4 flex justify-between items-center">
+                    <div class="flex items-center gap-4">
+                        <h1 class="text-3xl font-bold">Last.fm Dashboard</h1>
+                        ${this.userInfo ? `<div class="text-sm text-gray-400">User: <span class="font-semibold">${this.userInfo.name}</span> | Scrobbles: <span class="font-semibold">${this.userInfo.playcount}</span></div>` : ''}
+                    </div>
+                    <button id="disconnectBtn" class="px-4 py-2 bg-red-600 hover:bg-red-700 rounded text-sm">Disconnect / Change User</button>
+                </header>
+
+                <div class="flex-1 overflow-hidden flex">
+                    <div class="flex-1 flex flex-col">
+                        <div class="border-b border-gray-700">
+                            <div class="flex px-6 bg-gray-800">
+                                <button class="tab-btn active px-4 py-3 border-b-2 border-blue-500 font-semibold" data-tab="history">Recent History & Charts</button>
+                                <button class="tab-btn px-4 py-3 border-b-2 border-transparent font-semibold hover:border-gray-600" data-tab="race">Bar Chart Race</button>
+                            </div>
+                        </div>
+
+                        <div class="flex-1 overflow-auto">
+                            <div id="history" class="tab-content p-6">
+                                <div id="historyContent"></div>
+                            </div>
+                            <div id="race" class="tab-content hidden p-6">
+                                <div id="raceContent"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                const targetTab = e.target.dataset.tab;
+                this.startPageProgress(targetTab === 'race' ? 'Loading race data' : 'Loading history');
+                document.querySelectorAll('.tab-btn').forEach(b => {
+                    b.classList.remove('border-blue-500');
+                    b.classList.add('border-transparent');
+                });
+                e.target.classList.add('border-blue-500');
+                e.target.classList.remove('border-transparent');
+
+                document.querySelectorAll('.tab-content').forEach(tab => tab.classList.add('hidden'));
+                document.getElementById(targetTab).classList.remove('hidden');
+
+                try {
+                    if (targetTab === 'race') {
+                        this.updatePageProgress(22, 'Reading IndexedDB');
+                        await this.renderBarChartRace();
+                    } else {
+                        if (this.barChartRace) {
+                            this.barChartRace.pause();
+                            this.barChartRace = null;
+                        }
+                        const raceContent = document.getElementById('raceContent');
+                        if (raceContent) raceContent.innerHTML = '';
+                        this.revokeArtworkObjectUrls();
+                        this.updatePageProgress(22, 'Loading history');
+                        await this.renderHistory();
+                    }
+                    this.finishPageProgress('Ready');
+                } catch (err) {
+                    this.finishPageProgress('Error');
+                    throw err;
+                }
+            });
+        });
+
+        document.getElementById('disconnectBtn').addEventListener('click', () => {
+            this.authManager.clear();
+            window.location.reload();
+        });
+
+        onProgress?.(72, 'Loading dashboard');
+        await this.renderHistory();
+        onProgress?.(96, 'Ready');
+    }
+
+    async renderHistory() {
+        const container = document.getElementById('historyContent');
+        container.innerHTML = '<div class="text-center py-8">Loading...</div>';
+        this.revokeArtworkObjectUrls();
+        this.artistAlbumImageCache = {};
+
+        try {
+            this.updatePageProgress(36, 'Fetching Last.fm summaries');
+            const [recent, topArtists, topTracks, topAlbums] = await Promise.all([
+                this.apiClient.getRecentTracks(20),
+                this.apiClient.getTopArtists('overall', 12),
+                this.apiClient.getTopTracks('overall', 12),
+                this.apiClient.getTopAlbums('overall', 12)
+            ]);
+
+            this.updatePageProgress(58, 'Loading artwork cache');
+            const artistList = (topArtists.topartists?.artist || []).slice(0, 12);
+            await Promise.all(artistList.map(artist => this.getArtistAlbumImage(artist.name)));
+            this.updatePageProgress(76, 'Reading local cache');
+            await this.cache.open();
+            const cachedCount = (await this.cache.getAll('scrobbles')).length;
+
+            const renderArtistCard = (artist) => {
+                const plays = artist.playcount || artist.stats?.playcount || 0;
+                const imageUrl = this.artistAlbumImageCache[artist.name];
+                const bgColor = this.getColorForArtist(artist.name);
+                const initials = this.getInitials(artist.name);
+                
+                if (imageUrl) {
+                    return `
+                        <div class="bg-gray-800 rounded-lg p-3 text-center hover:bg-gray-700 transition">
+                            <img src="${imageUrl}" alt="${artist.name}" class="w-full aspect-square rounded mb-2 object-cover" onerror="this.style.display='none'">
+                            <p class="font-semibold text-sm truncate">${artist.name}</p>
+                            <p class="text-gray-400 text-xs">${plays} plays</p>
+                        </div>
+                    `;
+                } else {
+                    return `
+                        <div class="bg-gray-800 rounded-lg p-3 text-center hover:bg-gray-700 transition">
+                            <div style="background-color:${bgColor}; width:100%; aspect-ratio:1 / 1; border-radius:0.5rem; margin-bottom:0.5rem; display:flex; align-items:center; justify-content:center;" class="text-2xl font-bold text-white">${initials}</div>
+                            <p class="font-semibold text-sm truncate">${artist.name}</p>
+                            <p class="text-gray-400 text-xs">${plays} plays</p>
+                        </div>
+                    `;
+                }
+            };
+
+            container.innerHTML = `
+                <div class="space-y-8">
+                    <section>
+                        <h2 class="text-2xl font-bold mb-4">Recent Scrobbles</h2>
+                        <div class="grid gap-3 max-h-96 overflow-auto">
+                            ${(recent.recenttracks?.track || []).slice(0, 10).map(track => {
+                                const artist = this.getArtistName(track.artist);
+                                const album = track.album['#text'] || 'Unknown Album';
+                                const timestamp = track.date?.['#text'] || 'Now Playing';
+                                return `
+                                    <div class="bg-gray-800 p-3 rounded flex gap-3 items-start">
+                                        <img src="${track.image?.[2]?.['#text'] || 'https://via.placeholder.com/64'}" alt="" class="w-16 h-16 rounded" onerror="this.style.display='none'">
+                                        <div class="flex-1">
+                                            <p class="font-semibold text-sm">${track.name.substring(0, 50)}</p>
+                                            <p class="text-gray-400 text-xs">${artist}</p>
+                                            <p class="text-gray-500 text-xs">${album}</p>
+                                            <p class="text-gray-600 text-xs">${timestamp}</p>
+                                        </div>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </section>
+
+                    <section>
+                        <h2 class="text-2xl font-bold mb-4">Top Artists</h2>
+                        <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                            ${artistList.map(artist => renderArtistCard(artist)).join('')}
+                        </div>
+                    </section>
+
+                    <section>
+                        <h2 class="text-2xl font-bold mb-4">Top Tracks</h2>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                            ${(topTracks.toptracks?.track || []).slice(0, 12).map(track => {
+                                const plays = track.playcount || track.stats?.playcount || 0;
+                                return `
+                                    <div class="bg-gray-800 rounded-lg p-3 hover:bg-gray-700 transition">
+                                        <p class="font-semibold text-sm">${track.name.substring(0, 40)}</p>
+                                        <p class="text-gray-400 text-xs">${this.getArtistName(track.artist)}</p>
+                                        <p class="text-gray-500 text-xs">${plays} plays</p>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </section>
+
+                    <section>
+                        <h2 class="text-2xl font-bold mb-4">Settings</h2>
+                        <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+                            <div class="flex flex-wrap items-center justify-between gap-3">
+                                <div>
+                                    <p class="font-semibold text-sm">Local cache backup</p>
+                                    <div id="cacheProgressPanel" class="hidden mt-2 min-w-64">
+                                        <div class="flex items-center justify-between gap-3 mb-2">
+                                            <p id="cacheSettingsStatus" class="text-gray-400 text-xs">${cachedCount.toLocaleString()} scrobbles stored locally</p>
+                                            <span id="cacheProgressPercent" class="text-gray-500 text-xs tabular-nums">0%</span>
+                                        </div>
+                                        <div class="cache-progress-track">
+                                            <div id="cacheProgressBar" class="cache-progress-bar"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="flex flex-wrap gap-2">
+                                    <button id="exportCacheBtn" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm font-semibold transition">Export Cache</button>
+                                    <button id="importCacheBtn" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm font-semibold transition">Import Cache</button>
+                                    <button id="exportImageCacheBtn" class="px-4 py-2 bg-teal-600 hover:bg-teal-700 rounded text-sm font-semibold transition">Export Image Cache</button>
+                                    <button id="importImageCacheBtn" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm font-semibold transition">Import Image Cache</button>
+                                    <input id="importCacheInput" type="file" accept="application/zip,.zip,application/json,.json" class="hidden">
+                                    <input id="importImageCacheInput" type="file" accept="application/zip,.zip,application/json,.json" class="hidden">
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+            `;
+
+            this.bindCacheSettings();
+            this.updatePageProgress(92, 'History ready');
+        } catch (err) {
+            container.innerHTML = `<div class="text-red-500">Error loading history: ${err.message}</div>`;
+        }
+    }
+
+    bindCacheSettings() {
+        const exportBtn = document.getElementById('exportCacheBtn');
+        const importBtn = document.getElementById('importCacheBtn');
+        const exportImageBtn = document.getElementById('exportImageCacheBtn');
+        const importImageBtn = document.getElementById('importImageCacheBtn');
+        const importInput = document.getElementById('importCacheInput');
+        const importImageInput = document.getElementById('importImageCacheInput');
+        const status = document.getElementById('cacheSettingsStatus');
+        const progressPanel = document.getElementById('cacheProgressPanel');
+        const progressBar = document.getElementById('cacheProgressBar');
+        const progressPercent = document.getElementById('cacheProgressPercent');
+
+        const showCacheProgress = (label) => {
+            progressPanel?.classList.remove('hidden');
+            setCacheProgress(0, label);
+        };
+        const hideCacheProgress = () => {
+            setTimeout(() => {
+                progressPanel?.classList.add('hidden');
+                if (progressBar) progressBar.style.width = '0%';
+                if (progressPercent) progressPercent.textContent = '0%';
+            }, 650);
+        };
+        const setCacheProgress = (percent, label = null) => {
+            const value = Math.max(0, Math.min(100, Math.round(percent)));
+            if (progressBar) progressBar.style.width = `${value}%`;
+            if (progressPercent) progressPercent.textContent = `${value}%`;
+            if (status && label) status.textContent = label;
+        };
+
+        exportBtn?.addEventListener('click', async () => {
+            try {
+                exportBtn.disabled = true;
+                exportBtn.textContent = 'Exporting...';
+                showCacheProgress('Preparing cache export');
+                await this.exportCache((percent, label) => setCacheProgress(percent, label));
+                setCacheProgress(100, 'Cache exported successfully');
+                hideCacheProgress();
+            } catch (err) {
+                setCacheProgress(0, `Export failed: ${err.message}`);
+                hideCacheProgress();
+            } finally {
+                exportBtn.disabled = false;
+                exportBtn.textContent = 'Export Cache';
+            }
+        });
+
+        importBtn?.addEventListener('click', () => importInput?.click());
+        importInput?.addEventListener('change', async () => {
+            const file = importInput.files?.[0];
+            if (!file) return;
+
+            try {
+                importBtn.disabled = true;
+                importBtn.textContent = 'Importing...';
+                showCacheProgress('Preparing cache import');
+                await this.importCache(file, (percent, label) => setCacheProgress(percent, label));
+                const cachedCount = (await this.cache.getAll('scrobbles')).length;
+                setCacheProgress(100, `Imported cache. ${cachedCount.toLocaleString()} scrobbles stored locally`);
+                hideCacheProgress();
+                if (document.getElementById('race') && !document.getElementById('race').classList.contains('hidden')) {
+                    await this.renderBarChartRace();
+                }
+            } catch (err) {
+                setCacheProgress(0, `Import failed: ${err.message}`);
+                hideCacheProgress();
+            } finally {
+                importBtn.disabled = false;
+                importBtn.textContent = 'Import Cache';
+                importInput.value = '';
+            }
+        });
+
+        exportImageBtn?.addEventListener('click', async () => {
+            try {
+                exportImageBtn.disabled = true;
+                exportImageBtn.textContent = 'Exporting Images...';
+                showCacheProgress('Preparing image export');
+                await this.exportImageCache((percent, label) => setCacheProgress(percent, label));
+                setCacheProgress(100, 'Image cache exported successfully');
+                hideCacheProgress();
+            } catch (err) {
+                setCacheProgress(0, `Image export failed: ${err.message}`);
+                hideCacheProgress();
+            } finally {
+                exportImageBtn.disabled = false;
+                exportImageBtn.textContent = 'Export Image Cache';
+            }
+        });
+
+        importImageBtn?.addEventListener('click', () => importImageInput?.click());
+        importImageInput?.addEventListener('change', async () => {
+            const file = importImageInput.files?.[0];
+            if (!file) return;
+
+            try {
+                importImageBtn.disabled = true;
+                importImageBtn.textContent = 'Importing Images...';
+                showCacheProgress('Preparing image import');
+                await this.importImageCache(file, (percent, label) => setCacheProgress(percent, label));
+                const imageCount = (await this.cache.getAll('artwork')).length;
+                setCacheProgress(100, `Imported image cache. ${imageCount.toLocaleString()} image records stored locally`);
+                hideCacheProgress();
+                await this.renderHistory();
+            } catch (err) {
+                setCacheProgress(0, `Image import failed: ${err.message}`);
+                hideCacheProgress();
+            } finally {
+                importImageBtn.disabled = false;
+                importImageBtn.textContent = 'Import Image Cache';
+                importImageInput.value = '';
+            }
+        });
+    }
+
+    async renderBarChartRace() {
+        const container = document.getElementById('raceContent');
+        container.innerHTML = '<div class="text-center py-8">Loading local scrobble cache...</div>';
+
+        try {
+            this.updatePageProgress(26, 'Opening IndexedDB');
+            await this.cache.open();
+            let allTracks = await this.cache.getTracks();
+            if (!allTracks || allTracks.length === 0) {
+                container.innerHTML = '<div class="text-center py-8">Syncing local scrobble cache...</div>';
+                allTracks = await this.loadCachedScrobbles(true, progress => {
+                    this.updatePageProgress(Math.min(70, 28 + progress.page), 'Syncing scrobbles');
+                    container.innerHTML = `<div class="text-center py-8">Syncing local scrobble cache... ${progress.loaded.toLocaleString()} tracks loaded</div>`;
+                });
+            } else {
+                this.cachedTracks = allTracks;
+                this.cacheStatus = `${allTracks.length.toLocaleString()} cached scrobbles`;
+                this.loadCachedScrobbles(true).then(() => {
+                    const status = document.getElementById('raceCacheStatus');
+                    if (status) status.textContent = this.cacheStatus;
+                }).catch(err => console.warn('Incremental scrobble sync failed:', err));
+            }
+            this.updatePageProgress(48, 'Building year tabs');
+            const years = await this.getCachedYears();
+
+            if (!allTracks || allTracks.length === 0) {
+                container.innerHTML = '<div class="text-yellow-500">No scrobble history available</div>';
+                return;
+            }
+
+            if (this.selectedRaceYear !== 'all' && !years.includes(parseInt(this.selectedRaceYear))) {
+                this.selectedRaceYear = 'all';
+            }
+
+            container.innerHTML = `
+                <div class="space-y-4">
+                    <div class="flex flex-wrap items-center justify-between gap-3">
+                        <div class="flex flex-wrap gap-2" id="raceYearTabs">
+                            <button class="race-year-tab px-4 py-2 rounded text-sm font-semibold transition ${this.selectedRaceYear === 'all' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}" data-year="all">All-Time</button>
+                            ${years.map(year => `
+                                <button class="race-year-tab px-4 py-2 rounded text-sm font-semibold transition ${String(this.selectedRaceYear) === String(year) ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}" data-year="${year}">${year}</button>
+                            `).join('')}
+                        </div>
+                        <div id="raceCacheStatus" class="text-xs text-gray-400">${this.cacheStatus}</div>
+                    </div>
+                    <div id="raceYearSpinner" class="race-spinner">
+                        <span class="race-spinner-ring"></span>
+                        <span>Preparing timeline...</span>
+                    </div>
+                    <div id="chart"></div>
+                </div>
+            `;
+
+            this.bindRaceYearTabs(allTracks);
+            this.updatePageProgress(62, 'Parsing race data');
+            await this.renderRaceChart(allTracks, this.selectedRaceYear);
+            this.startHistoricalBackfill().then(async changed => {
+                if (changed && document.getElementById('raceContent') && !document.getElementById('race').classList.contains('hidden')) {
+                    await this.renderBarChartRace();
+                }
+            });
+        } catch (err) {
+            console.error('Bar chart error:', err);
+            container.innerHTML = `<div class="text-red-500">Error: ${err.message}</div>`;
+        }
+    }
+
+    bindRaceYearTabs(allTracks) {
+        document.querySelectorAll('.race-year-tab').forEach(tab => {
+            tab.addEventListener('click', async () => {
+                this.setRaceYearSpinner(true);
+                this.selectedRaceYear = tab.dataset.year;
+                document.querySelectorAll('.race-year-tab').forEach(btn => {
+                    btn.classList.remove('bg-blue-600', 'text-white');
+                    btn.classList.add('bg-gray-800', 'text-gray-300');
+                });
+                tab.classList.add('bg-blue-600', 'text-white');
+                tab.classList.remove('bg-gray-800', 'text-gray-300');
+                try {
+                    await this.renderRaceChart(allTracks, this.selectedRaceYear);
+                } finally {
+                    this.setRaceYearSpinner(false);
+                }
+            });
+        });
+    }
+
+    setRaceYearSpinner(isVisible) {
+        const spinner = document.getElementById('raceYearSpinner');
+        spinner?.classList.toggle('active', isVisible);
+    }
+
+    async renderRaceChart(allTracks, year) {
+        const chart = document.getElementById('chart');
+        if (!chart) return;
+
+        if (this.barChartRace) {
+            this.barChartRace.pause();
+            this.barChartRace = null;
+        }
+        chart.innerHTML = '';
+        this.revokeArtworkObjectUrls();
+
+        const scopedTracks = this.filterTracksByYear(allTracks, year);
+        if (scopedTracks.length === 0) {
+            chart.innerHTML = '<div class="text-yellow-500 bg-gray-800 rounded-lg p-4">No cached scrobbles for this period</div>';
+            return;
+        }
+
+        chart.innerHTML = '<div class="text-center py-8 text-gray-400">Preparing cached artwork...</div>';
+        let hydratedTracks = scopedTracks;
+        try {
+            this.updatePageProgress(70, 'Preparing artwork');
+            hydratedTracks = await this.hydrateRaceArtwork(scopedTracks);
+        } catch (err) {
+            console.warn('Artwork cache hydration skipped:', err);
+        }
+        this.updatePageProgress(82, 'Building timeline');
+        const processor = new DataProcessor(this.apiClient);
+        const temporalData = processor.buildTemporalData(hydratedTracks, 7);
+        const validData = temporalData.filter(frame => frame.artists && frame.artists.length > 0);
+
+        if (validData.length === 0) {
+            chart.innerHTML = '<div class="text-yellow-500 bg-gray-800 rounded-lg p-4">No artist data available for this period</div>';
+            return;
+        }
+
+        chart.innerHTML = '';
+        this.barChartRace = new BarChartRace('chart', validData);
+        this.barChartRace.render();
+        this.updatePageProgress(94, 'Race ready');
+    }
+}
+
+// ============================================
+// 6. Setup Modal Component
+// ============================================
+class SetupModal {
+    constructor(authManager) {
+        this.authManager = authManager;
+    }
+
+    render() {
+        const app = document.getElementById('app');
+        app.innerHTML = `
+            <div class="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 flex items-center justify-center p-4">
+                <div class="bg-gray-800 rounded-lg shadow-2xl max-w-md w-full p-8 border border-gray-700">
+                    <h1 class="text-3xl font-bold text-white mb-2">Last.fm Dashboard</h1>
+                    <p class="text-gray-400 mb-6">Configure your Last.fm credentials to get started</p>
+
+                    <div id="errorMsg" class="hidden bg-red-900 border border-red-600 text-red-100 px-4 py-3 rounded mb-4"></div>
+
+                    <form id="setupForm" class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-semibold text-gray-300 mb-2">Last.fm API Key</label>
+                            <input type="text" id="apiKey" placeholder="Your API Key" class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500">
+                            <p class="text-xs text-gray-500 mt-1"><a href="https://www.last.fm/api/account/create" target="_blank" class="text-blue-400 hover:underline">Get your API key here</a></p>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-semibold text-gray-300 mb-2">Last.fm Username</label>
+                            <input type="text" id="username" placeholder="Your Last.fm username" class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500">
+                        </div>
+
+                        <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded mt-6 transition">Save & Connect</button>
+                    </form>
+                </div>
+            </div>
+        `;
+
+        document.getElementById('setupForm').addEventListener('submit', (e) => this.handleSubmit(e));
+    }
+
+    async handleSubmit(e) {
+        e.preventDefault();
+        const apiKey = document.getElementById('apiKey').value.trim();
+        const username = document.getElementById('username').value.trim();
+        const errorMsg = document.getElementById('errorMsg');
+
+        if (!apiKey || !username) {
+            errorMsg.textContent = 'Please fill in all fields';
+            errorMsg.classList.remove('hidden');
+            return;
+        }
+
+        errorMsg.classList.add('hidden');
+        errorMsg.textContent = '';
+
+        try {
+            const client = new APIClient(apiKey, username);
+            await client.getUserInfo();
+
+            this.authManager.save(apiKey, username);
+            window.location.reload();
+        } catch (err) {
+            errorMsg.textContent = err.message;
+            errorMsg.classList.remove('hidden');
+        }
+    }
+}
+
+// ============================================
+// 7. App Initialization
+// ============================================
+class App {
+    constructor() {
+        this.authManager = new AuthManager();
+        this.progress = new ProgressUI('globalProgress', 'globalProgressBar');
+    }
+
+    async init() {
+        this.progress.start('Starting');
+        try {
+            if (!this.authManager.isAuthenticated()) {
+                this.progress.set(60, 'Loading setup');
+                const modal = new SetupModal(this.authManager);
+                modal.render();
+                this.progress.done('Ready');
+            } else {
+                this.progress.set(14, 'Loading credentials');
+                const auth = this.authManager.load();
+                const apiClient = new APIClient(auth.apiKey, auth.username);
+                const dashboard = new Dashboard(apiClient, this.authManager);
+                dashboard.setPageProgressHandler((action, percent, label) => {
+                    if (action === 'start') this.progress.start(label);
+                    if (action === 'set') this.progress.set(percent, label);
+                    if (action === 'done') this.progress.done(label);
+                });
+                await dashboard.renderDashboard((percent, label) => this.progress.set(percent, label));
+                this.progress.done('Ready');
+            }
+        } catch (err) {
+            this.progress.done('Error');
+            throw err;
+        }
+    }
+}
+
+const app = new App();
+app.init();
+</script>
+
+</body>
+</html>
+
